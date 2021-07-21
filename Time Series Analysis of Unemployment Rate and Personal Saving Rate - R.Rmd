@@ -1,0 +1,651 @@
+---
+title: "STAT 427 Final Project"
+author: "Claude Lee"
+date: "December 17, 2019"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(GGally)
+library(fpp2)
+library(seasonal)
+```
+
+
+# 1. Unemployment Rate of Bachelor's Degree College Graduates aged from 20 to 24
+
+## Data Description
+
+```{r 1-0, echo=FALSE}
+CGBD2024 <- read.csv("Data/CGBD2024.csv", header=TRUE)
+UCG <- ts(CGBD2024[,2], start = c(2000,1), frequency = 12)
+length(UCG)
+```
+
+- Monthly data from January, 2000 to November 2019 (Length: 239)
+
+- Not seaonally adjusted
+
+- Source: FRED (https://fred.stlouisfed.org/series/CGBD2024#0)
+
+
+
+## a) Preliminary Graphs and Analysis
+```{r 1-a, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+# Time Series Plot
+autoplot(UCG, xlab = "Year", ylab = "Unemployment Rate", main = "Unemployment Rate of College Graduates (Bachelor's) Aged from 20 to 24")
+
+# Seasonal/Lag Plots
+ggseasonplot(UCG)
+ggseasonplot(UCG, polar = TRUE)
+ggsubseriesplot(UCG)
+gglagplot(UCG)
+
+# ACF Plot
+ggAcf(UCG)
+
+# Transformation Plot
+autoplot(log(UCG))
+autoplot(BoxCox(UCG, BoxCox.lambda(UCG)))
+BoxCox.lambda(UCG)
+```
+
+- Trend: Polynomial trend. Small peak around 2004, large peak around 2012, and troughs around 2006, 2018. 
+
+- Seasonality: Strong seasonal pattern. Strong autocorrelation every 12 month. Peaks in June, July and January, and troughs in April and November.
+
+- Transformation: From the original time series plot, it is hard to tell whether we need transformation due to non-constatn variance. The plots of Box-Cox transformation of log and autoselection, we can see that they do not make much difference in forming constant variance. Therefore, we will not consider transformation. However, if we observe any non-constant variance issues in residual diagnostics in ant of our model, we will apply Box-Cox transformation.
+
+
+
+## b) Basic Forecasting
+
+To determine which basic forecasting method performs the best, we will split the data into training and test set and test which method gives the lowest accuracy error measures, as well as checking residuals. Before starting this process, let's see if there is any methods that may not be important to even consider. 
+
+- Naive: Since we know that this data is seasonal, Seasonal Naive method will most likely perform better than naive method. Therefore, we will not consider Naive method.
+
+- Average: This may perform better than any other methods since the data has overall cyclical trend not exactly increasing or decreasing.
+
+- Seasonal Naive: This will perform better than naive method, but still it does not take any overall trend into account. Still, we will compare the result.
+
+- Naive with Drift: This will be affected by the seasonal variation of the endpoints, so it will not be accurate. However, we will still compare the result.
+
+
+### Test/Training Set
+
+Since the length of our data set is 239, we will split them into 200 and 39 (about 20% of training set).
+
+```{r 1-b1, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+ucg.train <- head(UCG, 200)
+ucg.test <- tail(UCG, 39)
+autoplot(ucg.train) +
+  autolayer(ucg.test)
+```
+
+
+### Fitting & Plotting
+
+```{r 1-b2, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+ucg.mean1 <- meanf(ucg.train, 39)
+ucg.snaive1 <- snaive(ucg.train, 39)
+ucg.drift1 <- rwf(ucg.train, 39, drift = T)
+
+autoplot(UCG, xlab = "Year", ylab = "Unemployment Rate", main = "UCG Basic Forecasting") +
+  autolayer(ucg.mean1$mean, series = "Average Method") +
+  autolayer(ucg.snaive1$mean, series = "Seasonal Naive Method") +
+  autolayer(ucg.drift1$mean, series = "Naive with Drift Method") +
+  guides(color=guide_legend(title = "Forecast Method"))
+```
+
+- Looking at the plot, we can see that Seasonal Naive method is forecasting very close to the actual values. This may be due to the fact that there has not been a dramatic overal trend change in the recent 5 years of data that include test set.
+
+
+### Residual Diagnostics
+
+```{r 1-b3, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+checkresiduals(ucg.mean1)
+checkresiduals(ucg.snaive1)
+checkresiduals(ucg.drift1)
+```
+
+- Surprizingly, the residuals show that Naive with Drift captures overall trend as well as some seasonality. The other two methods' residuals plots show non-zero mean as well as high ACF over lags. Therefore, Naive with Drift may be the best option for this data.
+
+
+### Forecast Accuracy
+
+```{r 1-b4, echo = FALSE}
+accuracy(ucg.test, ucg.mean1$mean)
+accuracy(ucg.test, ucg.snaive1$mean)
+accuracy(ucg.test, ucg.drift1$mean)
+```
+
+- Even with residual diagnosics, the forecast accuracy states that Seaonal Naive method has the lowest forecast errors in most of measures. Therefore, we will use seasonal naive as our final basic forecast method.
+
+
+### Forecast with Seasonal Naive
+
+Since we used 39 data points for our test set, we will use h=36, which is about the same size as 39 while including 3 monthly cycle.
+
+```{r 1-b5, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+UCG.snaive.fc <- snaive(UCG, h=36)
+UCG.snaive.fc
+autoplot(UCG.snaive.fc, xlab = "Year", ylab = "Unemployment Rate", main = "UCG Seasonal Naive Forecasting") +
+  autolayer(fitted(UCG.snaive.fc), series = "Fitted")
+```
+
+- Limitation: This method does not take into account (non-monotonous) trend.
+
+
+
+## c) OLS Regression
+
+OLS Regression for time series requires two components to fit, Trend and Seasonality. For seasonality, we do not need to specify any values (unless Fourier), however we must find approporiate degree of trend. Looking at the overall shape of the time series curve, we can assume that it has some type of polynomial shape. Therefore, we will try 2-5 polynomials and fine the best-performing model by comparing test-training forecasting accuracy. For training/test set splitting, we will use the one from part (b).
+
+### Fitting & Plotting
+
+```{r 1-c1, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+ucg.ols2 <- tslm(ucg.train ~ poly(trend, 2) + season)
+ucg.ols3 <- tslm(ucg.train ~ poly(trend, 3) + season)
+ucg.ols4 <- tslm(ucg.train ~ poly(trend, 4) + season)
+ucg.ols5 <- tslm(ucg.train ~ poly(trend, 5) + season)
+
+ucg.ols.fc2 <- forecast(ucg.ols2, h=39)
+ucg.ols.fc3 <- forecast(ucg.ols3, h=39)
+ucg.ols.fc4 <- forecast(ucg.ols4, h=39)
+ucg.ols.fc5 <- forecast(ucg.ols5, h=39)
+
+autoplot(UCG, xlab = "Year", ylab = "Unemployment Rate", main = "UCG OLS Forecasting") +
+  autolayer(ucg.ols.fc2$mean, series = "Quadratic") +
+  autolayer(ucg.ols.fc3$mean, series = "Cubic") +
+  autolayer(ucg.ols.fc4$mean, series = "Quartic") +
+  autolayer(ucg.ols.fc5$mean, series = "Quintic") +
+  guides(color=guide_legend(title = "Forecast Method"))
+```
+
+- From the forecast plots, we can cleaarly see that cubic, quartic, and quintic trends are over-/under-estimating the forecasts.
+
+
+### Forecast Accuracy
+
+```{r 1-c2, echo=FALSE}
+accuracy(ucg.test, ucg.ols.fc2$mean)
+accuracy(ucg.test, ucg.ols.fc3$mean)
+accuracy(ucg.test, ucg.ols.fc4$mean)
+accuracy(ucg.test, ucg.ols.fc5$mean)
+```
+
+- The quadratic trend model has the lowest forecasting errors in most of the measures. Therefore, we will use quadratic trend OLS forecasting method for our final forecasts.
+
+
+### 2-Year Forecasts with Quadratic OLS
+
+```{r 1-c3, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+UCG.ols2 <- tslm(UCG ~ poly(trend, 2) + season)
+summary(UCG.ols2)
+UCG.ols2.fc <- forecast(UCG.ols2, h=24)
+UCG.ols2.fc
+autoplot(UCG.ols2.fc, xlab = "Year", ylab = "Unemployment Rate", main = "UCG Quadratic OLS Forecasting") +
+  autolayer(fitted(UCG.ols2.fc), series = "Fitted")
+```
+
+- Limitation: This method does not take into account nonconstant seasonality.
+
+
+## d) STL Decomposition
+
+For STL decomposition, we must input odd numbers for seasonal trend smoother and (optionally) time trend smoother, and both should refer to the number of consecutive years in the data. Since we have 239 data, we have about 19-20 consecutive years. Therefore, let's fit several values and compare the results of remainder components.
+
+### Fitting & Plotting
+
+```{r 1-d.1, echo = FALSE}
+# default t.window
+ucg.stl1 <- stl(UCG, s.window = 19, robust = TRUE)
+ucg.stl2 <- stl(UCG, s.window = 17, robust = TRUE)
+ucg.stl3 <- stl(UCG, s.window = 21, robust = TRUE)
+
+# t.window = 19
+ucg.stl4 <- stl(UCG, t.window = 19, s.window = 19, robust = TRUE)
+ucg.stl5 <- stl(UCG, t.window = 19, s.window = 17, robust = TRUE)
+ucg.stl6 <- stl(UCG, t.window = 19, s.window = 21, robust = TRUE)
+
+# t.window = 17
+ucg.stl7 <- stl(UCG, t.window = 17, s.window = 19, robust = TRUE)
+ucg.stl8 <- stl(UCG, t.window = 17, s.window = 17, robust = TRUE)
+ucg.stl9 <- stl(UCG, t.window = 17, s.window = 21, robust = TRUE)
+
+# t.window = 21
+ucg.stl10 <- stl(UCG, t.window = 21, s.window = 19, robust = TRUE)
+ucg.stl11 <- stl(UCG, t.window = 21, s.window = 17, robust = TRUE)
+ucg.stl12 <- stl(UCG, t.window = 21, s.window = 21, robust = TRUE)
+```
+
+```{r 1-d.2, echo=FALSE, out.height='25%', out.width='25%\\linewidth'}
+# Plot
+autoplot(ucg.stl1, main = "STL Decomposition (default, 19)")
+autoplot(ucg.stl2, main = "STL Decomposition (default, 17)")
+autoplot(ucg.stl3, main = "STL Decomposition (default, 21)")
+autoplot(ucg.stl4, main = "STL Decomposition (19, 19)")
+autoplot(ucg.stl5, main = "STL Decomposition (19, 17)")
+autoplot(ucg.stl6, main = "STL Decomposition (19, 21)")
+autoplot(ucg.stl7, main = "STL Decomposition (17, 19)")
+autoplot(ucg.stl8, main = "STL Decomposition (17, 17)")
+autoplot(ucg.stl9, main = "STL Decomposition (17, 21)")
+autoplot(ucg.stl10, main = "STL Decomposition (21, 19)")
+autoplot(ucg.stl11, main = "STL Decomposition (21, 17)")
+autoplot(ucg.stl12, main = "STL Decomposition (21, 21)")
+```
+
+- There is not much of difference in their remainder, seasonal, and time trend components. Therefore, let's stick with default time trend and seasonal trend as 19.
+
+```{r 1-d.3, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+autoplot(ucg.stl1, xlab = "Year", ylab = "Unemployment Rate", main = "STL Decomposition of UCG")
+```
+
+- Time Trend: There are two peaks around 2004 and 2010.
+- Seasonal Trend: Slight increase in the size of trend around 2010, but overall very similar over time.
+- Remainder: Some sinusoidal patterns over time.
+
+
+### Seasonally Adjusted Time Series
+
+```{r 1-d.4, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+autoplot(seasadj(ucg.stl1), xlab = "Year", ylab = "Unemployment Rate", main = "Seasonally Adjusted UCG")
+```
+
+
+### 2-Year Forecasts with STL & ETS
+
+For the forecasting method, let's use naive default ETS.
+
+```{r 1-d.5, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+UCG.stl1.fc <- stlf(UCG, s.window = 19, robust = TRUE, h = 24)
+UCG.stl1.fc
+autoplot(UCG.stl1.fc, xlab = "Year", ylab = "Unemployment Rate", main = "UCG STL ETS Forecasting") +
+  autolayer(fitted(UCG.stl1.fc), series = "Fitted")
+```
+
+
+### Forecast Accuracy
+
+Again, let's use previous test/training set from part (b) for the forecast accuracy calculation. Then, let's compare results from part (c)
+
+```{r 1-d.6, echo = FALSE}
+ucg.stl1Tr.fc <- stlf(ucg.train, s.window = 19, robust = TRUE, h = 39)
+accuracy(ucg.test, ucg.stl1Tr.fc$mean)
+accuracy(ucg.test, ucg.ols.fc2$mean)
+```
+
+- STL Decomposition with ETS forecasting method has lower forecast error mearsures. Therefore, STL Decomposition forecasts better than OLS regression.
+
+
+
+## e) Exponential Smoothing
+
+For exponential smoothing, let's compare SES, Holt's Linear Trend, and Holt-Winter's Seasonal methods by looking at their test/training set accuracy and residual plots. We will explore as many tuning options using test/training set from part (b). For alpha and initial values, we will use training set SSE minizing values (default).
+
+
+### Fitting & Plotting
+
+Note that for SES and Holt's Linear Trend, they do not capture seasonality. Therefore, let's use seasonally adjusted time series using STL model in part (e). Note that STL decomposition is additive, therefore we need to add the seasonal components back to the forecasts. Seasonal component's forecast will be done by ETS. For HW seaonal methods, we will explore all options of damping and seasonality.
+
+```{r 1-e.1, echo=FALSE}
+# Seasonal Adjustment
+ucg.train.STLmod <- stl(ucg.train, s.window = 19, robust = TRUE)
+ucg.train.sa <- seasadj(ucg.train.STLmod)
+ucg.train.seas <- as.data.frame(forecast(seasonal(ucg.train.STLmod), h=39)$mean)
+
+# SES
+ucg.es1 <- ts(as.data.frame(ses(ucg.train.sa, h = 39)$mean) + ucg.train.seas, start = c(2016,9), frequency = 12) 
+
+# Holt's Linear Trend
+ucg.es2 <- ts(as.data.frame(holt(ucg.train.sa, h=39)$mean) + ucg.train.seas, start = c(2016,9), frequency = 12)
+ucg.es3 <- ts(as.data.frame(holt(ucg.train.sa, damped = TRUE, h=39)$mean) + ucg.train.seas, start = c(2016,9), frequency = 12)
+
+# Holt-Winters' Seasonal
+ucg.es4 <- hw(ucg.train, seasonal = "additive", h=39)
+ucg.es5 <- hw(ucg.train, seasonal = "additive", damped = TRUE, h=39)
+ucg.es6 <- hw(ucg.train, seasonal = "multiplicative", h=39)
+ucg.es7 <- hw(ucg.train, seasonal = "multiplicative", damped = TRUE, h=39)
+```
+
+
+```{r 1-e.2, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+# Plot
+autoplot(ucg.test, xlab = "Year", ylab = "Unemployment Rate", main = "UCG Exponential Smoothing Forecasts") +
+  autolayer(ucg.es1, series = "SES") +
+  autolayer(ucg.es2, series = "HL Non-Damped") +
+  autolayer(ucg.es3, series = "HL Damped") +
+  autolayer(tail(ucg.es4$mean, 39), series = "HW Additive Non-Damped") +
+  autolayer(tail(ucg.es5$mean, 39), series = "HW Additive Damped") +
+  autolayer(tail(ucg.es6$mean, 39), series = "HW Multiplicative Non-Damped") +
+  autolayer(tail(ucg.es7$mean, 39), series = "HW Multiplicative Damped") +
+  guides(color=guide_legend(title = "Forecast Method"))
+```
+
+- From the plots, we can see that Holt-Winters' Additive Seasonality with Damped Trend (green curve) follow along the actual curve well.
+
+
+### Forecast Accuracy & Residual Diagnostics
+
+```{r 1-e.3, echo = FALSE}
+# Forecast Errors
+accuracy(ucg.test, ucg.es1)
+accuracy(ucg.test, ucg.es2)
+accuracy(ucg.test, ucg.es3)
+accuracy(ucg.test, ucg.es4$mean)
+accuracy(ucg.test, ucg.es5$mean)
+accuracy(ucg.test, ucg.es6$mean)
+accuracy(ucg.test, ucg.es7$mean)
+```
+
+- Holt-Winters' Additive Seasonal with Damped Trend has the lowest forecast error measures. This result is consistent what we found in plots.
+
+Now, let's see if this model's residuals resemble white noise.
+
+```{r 1-e.4, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+checkresiduals(ucg.es5)
+```
+
+- Residuals have zero mean with slightly non-constant variance, but not so noticeable.
+
+- Residuals are randomly, normally distributed (no big significant lags).
+
+Therefore, residuals roughly resemble white noise. -> Choose this model.
+
+
+### Forecast with Holt-Winters' Additive Seasonality with Damped Trend Model
+
+Let's forecast 3 years ahead.
+
+```{r 1-e.5, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+UCG.hw.fc1 <- hw(UCG, seasonal = "additive", damped = TRUE, h=36)
+UCG.hw.fc1
+autoplot(UCG.hw.fc1, xlab = "Year", ylab = "Unemployment Rate", main = "UCG HW Additive Damped Forecasting") +
+  autolayer(fitted(UCG.hw.fc1), series = "Fitted")
+```
+
+
+## Final Forecasts Graphical Comparisons for Next 2 Years
+
+```{r 1-F}
+# Seasonal Naive
+UCG.snaive.F <- snaive(UCG, h=24)
+
+# Quadratic OLS
+UCG.ols2.F <- forecast(UCG.ols2, h=24)
+
+# STL and ETS
+UCG.stl1.F <- stlf(UCG, s.window = 19, robust = TRUE, h = 24)
+
+# Holt-Winters' Additive Seasonality with Damped Trend
+UCG.hw.F <- hw(UCG, seasonal = "additive", damped = TRUE, h=24)
+
+# Plot
+autoplot(UCG, xlab = "Year", ylab = "Unemployment Rate", main = "UCG Forecasting Full Graph") +
+  autolayer(UCG.snaive.F$mean, series = "Seasonal Naive") +
+  autolayer(UCG.ols2.F$mean, series = "Quadratic OLS") +
+  autolayer(UCG.stl1.F$mean, series = "STL ETS") +
+  autolayer(UCG.hw.F$mean, series = "HW Add/Damped") +
+  guides(color = guide_legend(title = "Forecast Method"))
+autoplot(tail(UCG, 120), xlab = "Year", ylab = "Unemployment Rate", main = "UCG Forecasting - Past 10 Years") +
+  autolayer(UCG.snaive.F$mean, series = "Seasonal Naive") +
+  autolayer(UCG.ols2.F$mean, series = "Quadratic OLS") +
+  autolayer(UCG.stl1.F$mean, series = "STL ETS") +
+  autolayer(UCG.hw.F$mean, series = "HW Add/Damped") +
+  guides(color = guide_legend(title = "Forecast Method"))
+```
+
+- From the graphs, STL ETS and HW Add/Damped Models may be the most accurate.
+
+
+
+# 2. Personal Saving Rate
+
+## Data Description
+
+```{r 2-0, echo = FALSE}
+PSAVERT <- read.csv("Data/PSAVERT.csv")
+PSR <- ts(PSAVERT[,2], start = c(1959,1), frequency = 12)
+length(PSR)
+```
+
+- Monthly data from January, 1959 to October 2019 (Length: 730)
+
+- Seaonally adjusted
+
+- Source: FRED (https://fred.stlouisfed.org/series/PSAVERT)
+
+
+
+## a) Preliminary Graphs and Analysis
+```{r 2-a, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+# Time Series Plot
+autoplot(PSR, xlab = "Year", ylab = "Saving Rate", main = "Personal Saving Rate (Seasonally Adjusted)")
+
+# Seasonal/Lag Plots
+ggseasonplot(PSR)
+ggseasonplot(PSR, polar = TRUE)
+ggsubseriesplot(PSR)
+gglagplot(PSR)
+
+# ACF Plot
+ggAcf(PSR)
+
+# Transformation Plot
+autoplot(log(PSR))
+autoplot(BoxCox(PSR, BoxCox.lambda(PSR)))
+BoxCox.lambda(PSR)
+```
+
+- Trend: Polynomial overall trend. Peak around 1975 and trough around 2005.
+
+- Seasonality: Sine the data is seasonally adjusted, we expect no seasonality. The seasonal plots show that there isn't much strong seasonality. Although, the lag plots and ACf plot show that there is strong autocorrelation.
+
+- Transformation: From the original time series plot, it does not seem to have issues with constant variance expect a few spikes. These do not get solved through transformation in Box-Cox transformed plots, therefore we will not consider transformation. However, if we observe any issues in residuals plots in any forecasts, we may consider transformating.
+
+
+
+## b) Basic Forecasting
+
+To determine which basic forecasting method performs the best, we will split the data into training and test set and test which method gives the lowest accuracy error measures, as well as checking residuals. Before starting this process, let's see if there is any methods that may not be important to even consider. 
+
+- Naive: As you may have noticed in the time series plot, this data is not non-stationary, therefore most recent data point may not represent the future forecasts well. But, let's still compare the results with other forecasting methods.
+
+- Average: This may perform better than any other methods since the data has overall cyclical trend not exactly increasing or decreasing.
+
+- Seasonal Naive: This will not perform any better than Naive since the data is already seasonally adjusted. Therefore, we will not consider this method.
+
+- Naive with Drift: This will be affected by the variation of the endpoints, so it will not be accurate. However, we will still compare the result.
+
+
+### Test/Training Set
+
+Since the length of our data set is 730, we will split them into 600 and 130 (about 20% of training set).
+```{r 2-b1, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+psr.train <- head(PSR, 600)
+psr.test <- tail(PSR, 130)
+autoplot(psr.train) +
+  autolayer(psr.test)
+```
+
+
+### Fitting & Plotting
+
+```{r 2-b2, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+psr.naive1 <- naive(psr.train, 130)
+psr.mean1 <- meanf(psr.train, 130)
+psr.drift1 <- rwf(psr.train, 130, drift = T)
+
+autoplot(PSR, xlab = "Year", ylab = "Saving Rate", main = "PSR Basic Forecasting") +
+  autolayer(psr.naive1$mean, series = "Naive Method") +
+  autolayer(psr.mean1$mean, series = "Average Method") +
+  autolayer(psr.drift1$mean, series = "Naive with Drift Method") +
+  guides(color=guide_legend(title = "Forecast Method"))
+```
+
+- Average: fails to account for low value of the most recent data, thus overestimates.
+
+- Naive: visually closest to the actuals since it captures the low value of the most recent data.
+
+- Drift: fails to capture the recent increasing trend, therefore underestimates.
+
+From the plots, we can say that Naive method performs the best.
+
+
+### Residual Diagnostics
+
+```{r 2-b3, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+checkresiduals(psr.naive1)
+checkresiduals(psr.mean1)
+checkresiduals(psr.drift1)
+```
+
+- Residuals of Naive method and Naive with Drift method seem to have the same result that residuals have zero mean with constant variance, normal distribution, and relatively low autocorrelation. Residuals from average method do not have any of these properties.
+
+
+### Forecast Accuracy
+
+```{r 2-b4, echo = FALSE}
+accuracy(psr.test, psr.naive1$mean)
+accuracy(psr.test, psr.mean1$mean)
+accuracy(psr.test, psr.drift1$mean)
+```
+
+- As expected from plots, Naive method has the lowest forecast error measures. Therefore, we will forecast with Naive method for basic forecasting.
+
+
+### Forecast with Naive
+
+Since we used 130 data points for our test set, we will use h=100 for simplicity..
+
+```{r 2-b5, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+PSR.naive.fc <- naive(PSR, h=100)
+PSR.naive.fc
+autoplot(PSR.naive.fc, xlab = "Year", ylab = "Saving Rate", main = "PSR Naive Forecasting") +
+  autolayer(fitted(PSR.naive.fc), series = "Fitted")
+```
+
+- Limitation: This method does not take into account (non-monotonous) trend.
+
+
+
+## e) Exponential Smoothing
+
+For exponential smoothing, let's compare SES and Holt's Linear Trend methods by looking at their test/training set accuracy and residual plots. We will explore as many tuning options using test/training set from part (b). Note that Holw-Winters' Method will not be used since the data is already seasonally adjusted.
+
+
+### Fitting & Plotting
+
+Since we do not include Holt-Winters' Method, let's explore more of different parameter settings. For damped Holt's Linear trend, initial value is required to be optimal, we will use default values.
+
+```{r 2-e.1, echo = FALSE}
+# SES
+psr.es1 <- ses(psr.train, h=130) 
+psr.es2 <- ses(psr.train, alpha = 0.3, initial = "simple", h=130) 
+psr.es3 <- ses(psr.train, alpha = 0.6, initial = "simple", h=130) 
+psr.es4 <- ses(psr.train, alpha = 0.9, initial = "simple", h=130) 
+
+# Holt's Linear Trend
+psr.es5 <- holt(psr.train, h = 130)
+psr.es6 <- holt(psr.train, alpha = 0.3, initial = "simple", h = 130)
+psr.es7 <- holt(psr.train, alpha = 0.6, initial = "simple", h = 130)
+psr.es8 <- holt(psr.train, alpha = 0.9, initial = "simple", h = 130)
+psr.es9 <- holt(psr.train, damped = TRUE, h = 130)
+```
+
+
+```{r 2-e.2, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+# Plot
+autoplot(psr.test, xlab = "Year", ylab = "Saving Rate", main = "PSR Exponential Smoothing Forecasts") +
+  autolayer(tail(psr.es1, 130)$mean, series = "SES Default") +
+  autolayer(tail(psr.es2, 130)$mean, series = "SES 0.3") +
+  autolayer(tail(psr.es3, 130)$mean, series = "SES 0.6") +
+  autolayer(tail(psr.es4, 130)$mean, series = "SES 0.9") +
+  autolayer(tail(psr.es5, 130)$mean, series = "Holt Non-Damped Default") +
+  autolayer(tail(psr.es6, 130)$mean, series = "Holt Non-Damped 0.3") +
+  autolayer(tail(psr.es7, 130)$mean, series = "Holt Non-Damped 0.6") +
+  autolayer(tail(psr.es8, 130)$mean, series = "Holt Non-Damped 0.9") +
+  autolayer(tail(psr.es9, 130)$mean, series = "Holt Damped Default") +
+  guides(color=guide_legend(title = "Forecast Method"))
+```
+
+- By eliminating methods with large erros (Holt Non-Damped 0.3, 0.6, 0.9), let'see other methods more closely.
+
+
+```{r 2-e.3, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+autoplot(psr.test, xlab = "Year", ylab = "Saving Rate", main = "PSR Exponential Smoothing Forecasts") +
+  autolayer(tail(psr.es1, 130)$mean, series = "SES Default") +
+  autolayer(tail(psr.es2, 130)$mean, series = "SES 0.3") +
+  autolayer(tail(psr.es3, 130)$mean, series = "SES 0.6") +
+  autolayer(tail(psr.es4, 130)$mean, series = "SES 0.9") +
+  autolayer(tail(psr.es5, 130)$mean, series = "Holt Non-Damped Default") +
+  autolayer(tail(psr.es9, 130)$mean, series = "Holt Damped Default") +
+  guides(color=guide_legend(title = "Forecast Method"))
+```
+
+- From the plots, we can see that all methods besides SES 0.3 and Holt Non-Damped Default performs similarly. Therefore, let's compare these methods in forecast accuracy. However, note that all of them are flat forecasts, which may not be so meaningful.
+
+
+### Forecast Accuracy & Residual Diagnostics
+
+```{r 2-e.4, echo = FALSE}
+# Forecast Errors
+accuracy(psr.test, psr.es1$mean)
+accuracy(psr.test, psr.es3$mean)
+accuracy(psr.test, psr.es4$mean)
+accuracy(psr.test, psr.es9$mean)
+```
+
+- SES with `alpha = 0.9` has the lowest forecast error measures.
+
+Now, let's see if this model's residuals resemble white noise.
+
+```{r 2-e.5, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+checkresiduals(psr.es4)
+```
+
+- Residuals have zero mean and constant variance except a handful of spikes, which can be ignored.
+
+- Residuals are randomly, normally distributed (no big significant lags after 3 lags).
+
+Therefore, residuals roughly resemble white noise. -> Choose this model.
+
+
+### Forecast with SES with `alpha = 0.9` Model
+
+Since we chose `h=100` in the basic forecasting, let's forecast 100 steps ahead again.
+
+```{r 2-e.6, echo=FALSE, out.height='33%', out.width='33%\\linewidth'}
+PSR.ses.fc1 <- ses(PSR, alpha = 0.9, initial = "simple", h = 100)
+PSR.ses.fc1
+autoplot(PSR.ses.fc1, xlab = "Year", ylab = "Saving Rate", main = "PSR SES alpha = 0.9 Forecasting") +
+  autolayer(fitted(PSR.ses.fc1), series = "Fitted")
+```
+
+- This model returns flat forecasts. However, no other model considered above could predict the trend well. Therefore, these are our best estimates.
+
+
+## Final Forecasts Graphical Comparisons for Next 3 Years
+
+```{r 2-F}
+# Naive
+PSR.naive.F <- naive(PSR, h=36)
+
+# SES with alpha = 0.9
+PSR.ses.F <- ses(PSR, alpha = 0.9, initial = "simple", h = 36)
+
+# Plot
+autoplot(PSR, xlab = "Year", ylab = "Saving Rate", main = "PSR Forecasting Full Graph") +
+  autolayer(PSR.naive.F$mean, series = "Naive") +
+  autolayer(PSR.ses.F$mean, series = "SES") +
+  guides(color = guide_legend(title = "Forecast Method"))
+autoplot(tail(PSR, 120), xlab = "Year", ylab = "Saving Rate", main = "PSR Forecasting - Past 10 Years") +
+  autolayer(PSR.naive.F$mean, series = "Naive") +
+  autolayer(PSR.ses.F$mean, series = "SES") +
+  guides(color = guide_legend(title = "Forecast Method"))
+```
+
+- From the graphs, we can see that both methods return flat forecasts. Therefore, we need different forecasting models.
